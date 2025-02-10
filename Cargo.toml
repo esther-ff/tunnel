@@ -1,0 +1,10 @@
+[package]
+name = "tunnel"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lamp = { git = "https://github.com/esther-ff/lamp" }
+rustls = "0.23.22"
+rustls-pki-types = "1.11.0"
+webpki-roots = "0.26.8"
