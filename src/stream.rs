@@ -1,6 +1,6 @@
-use lamp::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use lamp::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, TokenBearer};
 
-use rustls::{ClientConfig, ClientConnection, Connection};
+use rustls::{ClientConfig, ClientConnection};
 use rustls_pki_types::ServerName;
 use std::io::{self, Read, Write};
 use std::marker::Unpin;
@@ -47,6 +47,18 @@ pub struct Stream<IO> {
 }
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> Stream<IO> {
+    pub fn new(io: IO, url: ServerName<'static>, cfg: ClientConfig) -> io::Result<Self> {
+        let conn = match ClientConnection::new(Arc::new(cfg), url) {
+            Ok(conn) => conn,
+            Err(e) => {
+                let err = io::Error::new(io::ErrorKind::Other, e);
+
+                return Err(err);
+            }
+        };
+
+        Ok(Self { io, conn })
+    }
     fn io_read(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<usize>> {
         let mut r = SyncAdapter {
             io: &mut self.io,
@@ -63,7 +75,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Stream<IO> {
             Ok(_state) => {}
             Err(e) => {
                 // Last ditch write
-                //self.conn.write_tls(&mut r);
+                self.conn.write_tls(&mut r);
 
                 let err = io::Error::new(io::ErrorKind::InvalidData, e);
                 return Poll::Ready(Err(err));
@@ -98,6 +110,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Stream<IO> {
 
             // Write
             while self.conn.wants_write() {
+                println!("handshake: started write");
                 match self.io_write(cx) {
                     Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
 
@@ -112,18 +125,23 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Stream<IO> {
                     }
                 }
             }
+            println!("handshake: finished write");
 
             // If we need a flush, do so
             if flush_required {
+                println!("handshake: started flush");
                 match Pin::new(&mut self.io).poll_flush(cx) {
                     Poll::Ready(Ok(())) => (),
                     Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                     Poll::Pending => write_block = true,
                 }
+
+                println!("handshake: finished flush");
             }
 
             // Read
             while self.conn.wants_read() && !eof {
+                println!("handshake: started read");
                 match self.io_read(cx) {
                     Poll::Ready(Ok(0)) => eof = true,
                     Poll::Ready(Ok(rdlen)) => read_len += rdlen,
@@ -135,21 +153,31 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Stream<IO> {
                 }
             }
 
-            match (eof, self.conn.is_handshaking()) {
+            println!("handshake: finished read");
+
+            dbg!(eof, self.conn.is_handshaking());
+            return match (eof, self.conn.is_handshaking()) {
                 (true, true) => {
                     let error = io::Error::new(io::ErrorKind::InvalidData, "eof on tls handshake");
 
-                    return Poll::Ready(Err(error));
+                    Poll::Ready(Err(error))
                 }
-                (_, false) => return Poll::Ready(Ok((read_len, write_len))),
-                (_, true) => return Poll::Pending,
+                (_, false) => Poll::Ready(Ok((read_len, write_len))),
+                (_, true) if write_block || read_block => {
+                    if read_len == 0 || write_len == 0 {
+                        Poll::Ready(Ok((read_len, write_len)))
+                    } else {
+                        Poll::Pending
+                    }
+                }
 
                 (..) => continue,
-            }
+            };
         }
     }
 
     fn complete_io(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        println!("complete_io: before handshake");
         if self.conn.is_handshaking() {
             match self.handshake(cx) {
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
@@ -157,6 +185,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Stream<IO> {
                 Poll::Pending => return Poll::Pending,
             }
         }
+        println!("complete_io: after handshake");
 
         if self.conn.wants_write() {
             match self.handshake(cx) {
@@ -170,8 +199,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Stream<IO> {
     }
 
     fn prep_read(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        println!("hmm");
         let _ = ready!(self.complete_io(cx));
-
+        println!("mmh");
         while self.conn.wants_read() {
             let res = ready!(self.handshake(cx));
             if res?.0 == 0 {
@@ -183,17 +213,63 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Stream<IO> {
     }
 }
 
+impl<IO: AsyncRead + AsyncWrite + Unpin + TokenBearer> TokenBearer for Stream<IO> {
+    fn get_token(&self) -> mio::Token {
+        self.io.get_token()
+    }
+}
+
 impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for Stream<IO> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
-        ready!(self.prep_read(cx));
+        println!("rustls prep read start");
+        match ready!(self.prep_read(cx)) {
+            Ok(_) => {}
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+        println!("rustls prep read end");
+
+        println!("rustls read start");
         match self.conn.reader().read(buf) {
             Ok(n) => return Poll::Ready(Ok(n)),
             Err(e) => return Poll::Ready(Err(e)),
         }
+        println!("rustls read end");
+    }
+}
+
+impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for Stream<IO> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let len = match self.conn.writer().write(buf) {
+            Ok(n) => n,
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+
+        while self.conn.wants_write() {
+            let out = ready!(self.handshake(cx));
+            if out?.1 == 0 {
+                break;
+            }
+        }
+
+        Poll::Ready(Ok(len))
+    }
+
+    fn poll_flush<'f>(mut self: Pin<&mut Self>, cx: &mut Context<'f>) -> Poll<io::Result<()>> {
+        match self.conn.writer().flush() {
+            Ok(n) => return Poll::Ready(Ok(n)),
+            Err(e) => return Poll::Ready(Err(e)),
+        }
+
+        let io = Pin::new(&mut self.io);
+        io.poll_flush(cx)
     }
 }
 
