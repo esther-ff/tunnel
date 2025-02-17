@@ -6,7 +6,9 @@ edition = "2024"
 [lib]
 
 [dependencies]
-lamp = { git = "https://github.com/esther-ff/lamp" }
+# lamp = { git = "https://github.com/esther-ff/lamp" }
+lamp = { path = "/data/git/lamp" }
+log = "0.4.25"
 mio = "1.0.3"
 rustls = "0.23.22"
 rustls-pki-types = "1.11.0"
