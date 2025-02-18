@@ -8,8 +8,9 @@ mod tests {
 
     use super::*;
     use lamp::io::TcpStream;
-    use lamp::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+    use lamp::io::{AsyncReadExt, AsyncWriteExt};
     use lamp::runtime::Executor;
+    use log::info;
     use stream::Stream;
 
     use log::{Level, Metadata, Record};
@@ -47,8 +48,7 @@ mod tests {
 
         log_init(&LOG).expect("log fail");
         let mut rt = Executor::new(4);
-        rt.block_on(async {
-            let ip = "147.182.252.2:443";
+        let result = rt.block_on(async {
             let url = "echo.free.beeceptor.com:443";
 
             let dns_name = "echo.free.beeceptor.com".try_into().unwrap();
@@ -71,15 +71,40 @@ mod tests {
                 "\r\n"
             )
             .as_bytes();
+            dbg!(req.len());
 
             let write = stream.write(req).await;
-            let _ = stream.flush().await;
-            let mut buf: [u8; 128] = [0u8; 128];
-            let read = stream.read(&mut buf).await.unwrap();
+            match write {
+                Ok(wrlen) => {
+                    dbg!(wrlen);
+                }
+                Err(e) => {
+                    dbg!(e);
+                    assert!(false, "failed write");
+                }
+            }
 
+            info!("flushing");
+            let _ = stream.flush().await;
+
+            info!("reading");
+            let mut buf: [u8; 128] = [0u8; 128];
+            let read = stream.read(&mut buf).await;
+
+            match read {
+                Ok(rdlen) => {
+                    dbg!(rdlen);
+                }
+                Err(e) => {
+                    dbg!(e);
+                    assert!(false, "failed read");
+                }
+            }
             println!("{:?}", buf);
         });
 
         rt.shutdown();
+
+        assert!(result.is_ok(), "runtime shutdown abruptly due to an error");
     }
 }

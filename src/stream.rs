@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::task::ready;
 use std::task::{Context, Poll};
 
+use log::info;
+
 pub struct SyncAdapter<'adapter, 'cx, IO> {
     io: &'adapter mut IO,
     cx: &'adapter mut Context<'cx>,
@@ -47,11 +49,7 @@ pub struct Stream<IO> {
 }
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> Stream<IO> {
-    pub fn create(
-        io: IO,
-        url: ServerName<'static>,
-        cfg: ClientConfig,
-    ) -> io::Result<Handshake<IO>> {
+    pub fn create(io: IO, url: ServerName<'static>, cfg: ClientConfig) -> io::Result<Ready<IO>> {
         let conn = match ClientConnection::new(Arc::new(cfg), url) {
             Ok(conn) => conn,
             Err(e) => {
@@ -62,10 +60,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Stream<IO> {
         };
 
         let stream = Self { io, conn };
-        Ok(Handshake {
-            io: Some(stream),
-            test: false,
-        })
+        Ok(Ready::Handshaking(stream))
     }
 
     fn conn_fn<F, T>(&self, f: F) -> T
@@ -305,30 +300,33 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for Stream<IO> {
     }
 }
 
-pub struct Handshake<Rw> {
-    io: Option<Stream<Rw>>,
-    test: bool,
+pub enum Ready<Rw> {
+    Handshaking(Stream<Rw>),
+    Done,
 }
 
-impl<Rw: AsyncRead + AsyncWrite + Unpin> Future for Handshake<Rw> {
+impl<Rw: AsyncRead + AsyncWrite + Unpin> Future for Ready<Rw> {
     type Output = io::Result<Stream<Rw>>;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.test {
-            println!("Polled after guhh");
-        };
+        use std::mem;
 
         let me = self.get_mut();
-        let stream = me.io.as_mut().unwrap(); // SHOULD BE infallible.
 
-        while stream.conn_fn(|c| c.is_handshaking()) {
+        let mut stream = match mem::replace(me, Ready::Done) {
+            Ready::Done => panic!("polled after completion"),
+            Ready::Handshaking(stream) => stream,
+        };
+
+        while stream.conn.is_handshaking() {
+            info!("stream handshaking");
             match stream.handshake(cx) {
-                Poll::Ready(Ok(_l)) => me.test = true,
+                Poll::Ready(Ok(_l)) => {}
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => return Poll::Pending,
-            }
+            };
         }
+        info!("stream finished handshaking");
 
-        let rw = me.io.take().unwrap(); // AGAIN: Should be infallible.
-        Poll::Ready(Ok(rw))
+        Poll::Ready(Ok(stream))
     }
 }
