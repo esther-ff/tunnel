@@ -19,13 +19,13 @@ mod tests {
 
     impl log::Log for Logger {
         fn enabled(&self, m: &Metadata) -> bool {
-            m.level() <= Level::Info
+            m.level() <= Level::Trace
         }
 
         fn log(&self, r: &Record) {
             if self.enabled(r.metadata()) {
                 println!(
-                    "[{}: {}] => {}",
+                    "{} {}: {}",
                     r.level(),
                     r.file().map_or("undetected", |x| x),
                     r.args()
@@ -37,7 +37,7 @@ mod tests {
     }
 
     fn log_init(logger: &'static Logger) -> Result<(), log::SetLoggerError> {
-        log::set_logger(logger).map(|()| log::set_max_level(log::LevelFilter::Info))
+        log::set_logger(logger).map(|()| log::set_max_level(log::LevelFilter::Debug))
     }
 
     use webpki_roots::TLS_SERVER_ROOTS;
@@ -48,10 +48,11 @@ mod tests {
 
         log_init(&LOG).expect("log fail");
         let mut rt = Executor::new(4);
+        
         let result = rt.block_on(async {
-            let url = "echo.free.beeceptor.com:443";
+            let url = "www.rust-lang.org:443";
 
-            let dns_name = "echo.free.beeceptor.com".try_into().unwrap();
+            let dns_name = "www.rust-lang.org".try_into().unwrap();
             let certs = RootCertStore {
                 roots: TLS_SERVER_ROOTS.into(),
             };
@@ -61,7 +62,6 @@ mod tests {
                 .with_no_client_auth();
 
             let sock = std::net::TcpStream::connect(url).unwrap();
-
             let io = TcpStream::from_std(sock).unwrap();
             let mut stream = Stream::create(io, dns_name, cfg).unwrap().await.unwrap();
 
@@ -71,7 +71,6 @@ mod tests {
                 "\r\n"
             )
             .as_bytes();
-            dbg!(req.len());
 
             let write = stream.write(req).await;
             match write {
@@ -83,24 +82,27 @@ mod tests {
                     assert!(false, "failed write");
                 }
             }
-
-            info!("flushing");
             let _ = stream.flush().await;
 
             info!("reading");
-            let mut buf: [u8; 128] = [0u8; 128];
+            let mut buf: [u8; 4096] = [0u8; 4096];
             let read = stream.read(&mut buf).await;
 
-            match read {
+            let rdlen = match read {
                 Ok(rdlen) => {
                     dbg!(rdlen);
+                    rdlen
                 }
                 Err(e) => {
                     dbg!(e);
-                    assert!(false, "failed read");
+                    panic!("failed read")
                 }
-            }
-            println!("{:?}", buf);
+            };
+
+            let string = std::str::from_utf8(&buf[0..rdlen]);
+            assert!(string.is_ok(), "buf is not correct utf-8");
+
+            println!("response:\n {}", string.unwrap());
         });
 
         rt.shutdown();
