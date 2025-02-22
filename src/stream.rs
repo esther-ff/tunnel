@@ -2,7 +2,7 @@ use lamp::io::{AsyncRead, AsyncWrite, TokenBearer};
 
 use rustls::{ClientConfig, ClientConnection};
 use rustls_pki_types::ServerName;
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, Read, Write};
 use std::marker::Unpin;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -58,8 +58,12 @@ pub struct Stream<IO> {
 }
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> Stream<IO> {
-    pub fn create(io: IO, url: ServerName<'static>, cfg: ClientConfig) -> io::Result<Ready<IO>> {
-        let conn = match ClientConnection::new(Arc::new(cfg), url) {
+    pub fn create(
+        io: IO,
+        url: ServerName<'static>,
+        cfg: Arc<ClientConfig>,
+    ) -> io::Result<Ready<IO>> {
+        let conn = match ClientConnection::new(cfg, url) {
             Ok(conn) => conn,
             Err(e) => {
                 let err = io::Error::new(io::ErrorKind::Other, e);
@@ -92,9 +96,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Stream<IO> {
         };
 
         match self.conn.process_new_packets() {
-            Ok(_state) => {
-                // dbg!(state);
-            }
+            Ok(_state) => {}
             Err(e) => {
                 // Last ditch write
                 let _ = self.conn.write_tls(&mut r);
@@ -132,24 +134,20 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Stream<IO> {
 
             // Write
             while self.conn.wants_write() {
-                debug!("write op in handshake");
                 match self.io_write(cx) {
                     Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
 
                     Poll::Ready(Ok(0)) => {
                         let err = io::Error::from(io::ErrorKind::WriteZero);
-                        error!("write op in handshake: {}", err);
                         return Poll::Ready(Err(err));
                     }
                     Poll::Ready(Ok(wrlen)) => {
                         write_len += wrlen;
                         flush_required = true;
-                        debug!("write op in handshake finished");
                     }
 
                     Poll::Pending => {
                         write_block = true;
-                        debug!("write op in handshake would block");
                         break;
                     }
                 }
@@ -162,20 +160,16 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Stream<IO> {
                     Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                     Poll::Pending => write_block = true,
                 }
-
-                debug!("flush in handshake done");
             }
 
             // Read
             while self.conn.wants_read() && !eof {
-                debug!("read op in handshake");
                 match self.io_read(cx) {
                     Poll::Ready(Ok(0)) => eof = true,
                     Poll::Ready(Ok(rdlen)) => read_len += rdlen,
                     Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                     Poll::Pending => {
                         read_block = true;
-                        debug!("read op in handshake blocked");
                         break;
                     }
                 }
@@ -259,26 +253,16 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for Stream<IO> {
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
         while self.conn.wants_read() {
-            debug!("READING IN poll_read");
             match self.io_read(cx) {
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Ready(Ok(_ln)) => {
                     debug!("read len: {}", _ln);
                 }
                 Poll::Pending => {
-                    debug!("read block at poll_read");
                     return Poll::Pending;
                 }
             }
         }
-
-        let _state = self.conn.process_new_packets().map_err(|err| {
-            // Desperate last write.
-            // Maybe we can get a message through.
-            error!("error while processing tls traffic: {}", err);
-            let _poll = self.io_write(cx);
-        });
-        debug!("{:#?}", _state);
 
         return match self.conn.reader().read(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
@@ -294,7 +278,6 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for Stream<IO> {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let mut written = 0;
-        //let mut write_block = false;
 
         while buf.len() != written {
             match self.conn.writer().write(buf) {
@@ -344,21 +327,16 @@ impl<Rw: AsyncRead + AsyncWrite + Unpin> Future for Ready<Rw> {
         };
 
         while stream.conn.is_handshaking() {
-            info!("stream handshaking");
             dbg!(stream.conn.is_handshaking());
             match stream.handshake(cx) {
-                Poll::Ready(Ok(_l)) => {
-                    debug!("successful handshk op");
-                }
+                Poll::Ready(Ok(_l)) => {}
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => {
-                    debug!("handshake would block");
                     let _ = mem::replace(me, Ready::Handshaking(stream));
                     return Poll::Pending;
                 }
             };
         }
-        info!("stream finished handshaking");
 
         Poll::Ready(Ok(stream))
     }

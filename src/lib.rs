@@ -1,6 +1,9 @@
 #![allow(dead_code)]
 
+mod http;
 mod stream;
+mod tls_client;
+
 #[cfg(test)]
 mod tests {
 
@@ -11,6 +14,9 @@ mod tests {
     use lamp::io::{AsyncReadExt, AsyncWriteExt};
     use lamp::runtime::Executor;
     use log::info;
+    use std::sync::Arc;
+    use webpki_roots::TLS_SERVER_ROOTS;
+
     use stream::Stream;
 
     use log::{Level, Metadata, Record};
@@ -40,15 +46,12 @@ mod tests {
         log::set_logger(logger).map(|()| log::set_max_level(log::LevelFilter::Debug))
     }
 
-    use webpki_roots::TLS_SERVER_ROOTS;
     #[test]
-
-    fn connect_to_echo() {
+    fn connect_to_rust_lang_stream_only() {
         static LOG: Logger = Logger;
-
         log_init(&LOG).expect("log fail");
         let mut rt = Executor::new(4);
-        
+
         let result = rt.block_on(async {
             let url = "www.rust-lang.org:443";
 
@@ -63,7 +66,10 @@ mod tests {
 
             let sock = std::net::TcpStream::connect(url).unwrap();
             let io = TcpStream::from_std(sock).unwrap();
-            let mut stream = Stream::create(io, dns_name, cfg).unwrap().await.unwrap();
+            let mut stream = Stream::create(io, dns_name, Arc::new(cfg))
+                .unwrap()
+                .await
+                .unwrap();
 
             let req = concat!(
                 "GET / HTTP/1.1\r\n",
@@ -74,9 +80,7 @@ mod tests {
 
             let write = stream.write(req).await;
             match write {
-                Ok(wrlen) => {
-                    dbg!(wrlen);
-                }
+                Ok(_) => {}
                 Err(e) => {
                     dbg!(e);
                     assert!(false, "failed write");
@@ -84,29 +88,56 @@ mod tests {
             }
             let _ = stream.flush().await;
 
-            info!("reading");
             let mut buf: [u8; 4096] = [0u8; 4096];
             let read = stream.read(&mut buf).await;
 
-            let rdlen = match read {
+            match read {
                 Ok(rdlen) => {
                     dbg!(rdlen);
-                    rdlen
                 }
                 Err(e) => {
                     dbg!(e);
                     panic!("failed read")
                 }
             };
-
-            let string = std::str::from_utf8(&buf[0..rdlen]);
-            assert!(string.is_ok(), "buf is not correct utf-8");
-
-            println!("response:\n {}", string.unwrap());
         });
 
         rt.shutdown();
 
         assert!(result.is_ok(), "runtime shutdown abruptly due to an error");
+    }
+
+    #[test]
+    fn connect_to_rust_lang_via_client() {
+        use tls_client::TlsClient;
+
+        let mut rt = Executor::new(4);
+
+        let req = concat!(
+            "GET / HTTP/1.1\r\n",
+            "User-Agent: testing/0.0.1\r\n",
+            "\r\n"
+        )
+        .as_bytes();
+
+        let task = async move {
+            let mut client = match TlsClient::create(None, "www.rust-lang.org") {
+                Ok(cl) => cl.await.expect("failure of client"),
+                Err(e) => panic!("{}", e),
+            };
+
+            let mut buf: [u8; 4096] = [0u8; 4096];
+
+            let _ = client.write(&req).await;
+            let read = client.read(&mut buf).await.unwrap();
+
+            println!("{}", std::str::from_utf8(&buf[0..read]).unwrap());
+        };
+
+        let res = rt.block_on(task);
+
+        rt.shutdown();
+
+        assert!(res.is_ok(), "runtime shutdown abruptly due to an error");
     }
 }
