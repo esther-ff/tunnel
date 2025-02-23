@@ -3,7 +3,7 @@ use crate::tls_client::{Resolving, TlsClient};
 use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
-use std::task::{ready, Context, Poll};
+use std::task::{Context, Poll, ready};
 
 pub(crate) struct Connecting<'c> {
     tls: Resolving<'c>,
@@ -99,5 +99,9 @@ impl<'c> Client<'c> {
         }
     }
 
-    fn execute(&self, req: ReqBuilder) {}
+    pub fn execute(&'c mut self, req: ReqBuilder) -> RequestFuture<'c> {
+        let data = req.construct();
+
+        RequestFuture::new(data, &mut self.tls)
+    }
 }

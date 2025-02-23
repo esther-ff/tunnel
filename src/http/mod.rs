@@ -1,3 +1,3 @@
-mod client;
-mod request;
-mod response;
+pub mod client;
+pub mod request;
+pub mod response;

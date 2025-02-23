@@ -140,4 +140,28 @@ mod tests {
 
         assert!(res.is_ok(), "runtime shutdown abruptly due to an error");
     }
+
+    #[test]
+    fn connect_to_rust_lang_via_https_client() {
+        use http::client::{Client, Method};
+        use http::request::ReqBuilder;
+
+        let mut rt = Executor::new(4);
+
+        let res = rt.block_on(async {
+            let mut req = ReqBuilder::new(Method::GET);
+
+            let mut client = Client::connect("www.rust-lang.org", "tunnel-test/0.0.1", None)
+                .unwrap()
+                .await
+                .unwrap();
+            req.add_headers(vec![("Test-header", "Test-value")]);
+
+            client.execute(req).await.unwrap();
+        });
+
+        rt.shutdown();
+
+        assert!(res.is_ok(), "runtime shutdown abruptly due to an error");
+    }
 }

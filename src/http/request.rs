@@ -11,9 +11,9 @@ use std::mem::MaybeUninit;
 const HEADER_MAX: usize = 24;
 
 pub(crate) struct RequestFuture<'a> {
-    data: &'a [u8],
+    data: Option<Vec<u8>>,
     tls: &'a mut TlsClient<'a>,
-    buf: Option<&'a mut [u8]>,
+    buf: Option<Vec<u8>>,
 }
 
 macro_rules! out {
@@ -25,25 +25,43 @@ macro_rules! out {
     };
 }
 
+impl<'a> RequestFuture<'a> {
+    pub(crate) fn new(data: Vec<u8>, tls: &'a mut TlsClient<'a>) -> Self {
+        RequestFuture {
+            data: Some(data),
+            tls,
+            buf: Some(Vec::with_capacity(8192)),
+        }
+    }
+}
+
 impl Future for RequestFuture<'_> {
     type Output = io::Result<()>;
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let data = &*self.data;
+        let data = self.data.take().unwrap();
+        let tls = &mut *self.tls;
+        let res = match Pin::new(tls).poll_write(cx, &data) {
+            Poll::Pending => {
+                self.data.replace(data);
 
-        let res = ready!(Pin::new(&mut *self.tls).poll_write(cx, data));
+                return Poll::Pending;
+            }
+
+            Poll::Ready(res) => res,
+        };
         out!(res);
 
         let flush_res = ready!(Pin::new(&mut *self.tls).poll_flush(cx));
         out!(flush_res);
 
-        let buf = self
+        let mut buf = self
             .buf
             .take()
             .expect("buf field for RequestFuture should not be empty");
 
         let pin = Pin::new(&mut *self.tls);
 
-        match pin.poll_write(cx, buf) {
+        match pin.poll_write(cx, &mut buf) {
             Poll::Pending => {
                 self.buf.replace(buf);
                 Poll::Pending
