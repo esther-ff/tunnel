@@ -3,7 +3,7 @@ use crate::tls_client::{Resolving, TlsClient};
 use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
-use std::task::{Context, Poll, ready};
+use std::task::{ready, Context, Poll};
 
 pub(crate) struct Connecting<'c> {
     tls: Resolving<'c>,
@@ -41,6 +41,7 @@ pub struct Client<'c> {
     headers: Option<HeaderList<'c>>,
 }
 
+#[derive(Debug)]
 pub enum Method {
     GET,
     PUT,

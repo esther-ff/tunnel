@@ -8,7 +8,7 @@ use crate::tls_client::TlsClient;
 use lamp::io::{AsyncRead, AsyncWrite};
 use std::mem::MaybeUninit;
 
-const HEADER_MAX: usize = 64;
+const HEADER_MAX: usize = 24;
 
 pub(crate) struct RequestFuture<'a> {
     data: &'a [u8],
@@ -55,6 +55,7 @@ impl Future for RequestFuture<'_> {
     }
 }
 
+#[derive(Debug)]
 pub struct HeaderList<'h> {
     hdr: [MaybeUninit<(&'h str, &'h str)>; HEADER_MAX],
     cursor: usize,
@@ -69,13 +70,13 @@ impl<'h> HeaderList<'h> {
     }
 
     fn can_push(&self) -> bool {
-        self.cursor - 1 != HEADER_MAX
+        self.cursor >= HEADER_MAX
     }
 
     pub(crate) fn put(&mut self, hdr: (&'h str, &'h str)) {
         // Ensures we don't overflow.
         // This function should be coupled with `can_push`.
-        if self.cursor - 1 == HEADER_MAX {
+        if self.can_push() {
             return;
         }
 
@@ -129,7 +130,8 @@ impl<'i> Iterator for HdrListIter<'i> {
     type Item = (&'i str, &'i str);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.pos == self.hdrs.cursor - 1 {
+        if self.pos == self.hdrs.cursor {
+            println!("returning none");
             return None;
         }
 
@@ -141,15 +143,21 @@ impl<'i> Iterator for HdrListIter<'i> {
 
 impl std::ops::Drop for HeaderList<'_> {
     fn drop(&mut self) {
+        if self.cursor == 0 {
+            return;
+        };
+
+        self.cursor -= 1;
         while self.cursor != 0 {
             self.dealloc(self.cursor);
-            self.cursor += 1;
+            self.cursor -= 1;
         }
 
         self.dealloc(0);
     }
 }
 
+#[derive(Debug)]
 pub struct ReqBuilder<'b> {
     method: Method,
     route: Option<&'b str>,
@@ -200,6 +208,8 @@ impl<'b> ReqBuilder<'b> {
 
             hdrlist.put(tuple);
         });
+
+        self.extra_headers.replace(hdrlist);
 
         self
     }
@@ -287,6 +297,16 @@ mod tests {
     }
 
     #[test]
+    fn try_overflow_header_list() {
+        let mut hdrs = HeaderList::new();
+
+        // HeaderLists are preallocated arrays of 24 `MaybeUninit<(&str, &str)>`
+        for _ in 0..48 {
+            hdrs.put(("dummy", "dummy"));
+        }
+    }
+
+    #[test]
     fn req_builder() {
         let mut hdrs = HeaderList::new();
         hdrs.put(("User-Agent", "Versailles"));
@@ -296,6 +316,8 @@ mod tests {
         req.set_route("/droit/humain")
             .set_content("pas de dieu, pas de maitre".as_bytes())
             .add_headers(hdrs.iter());
+
+        dbg!(&req);
 
         let bytes = req.construct();
 
