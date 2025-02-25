@@ -6,6 +6,7 @@ edition = "2024"
 [lib]
 
 [dependencies]
+futures = "0.3.31"
 # lamp = { git = "https://github.com/esther-ff/lamp" }
 lamp = { path = "/data/git/lamp" }
 log = "0.4.25"

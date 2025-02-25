@@ -152,12 +152,11 @@ mod tests {
             let mut req = ReqBuilder::new(Method::GET);
 
             let mut client = Client::connect("www.rust-lang.org", "tunnel-test/0.0.1", None)
-                .unwrap()
                 .await
                 .unwrap();
             req.add_headers(vec![("Test-header", "Test-value")]);
 
-            client.execute(req).await.unwrap();
+            let test = client.execute(req).await.unwrap();
         });
 
         rt.shutdown();

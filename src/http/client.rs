@@ -1,45 +1,13 @@
 use super::request::{HeaderList, ReqBuilder, RequestFuture};
 use crate::tls_client::{Resolving, TlsClient};
+use futures::channel::oneshot;
+use lamp::Executor;
+use lamp::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
+use std::sync::mpsc;
 use std::task::{Context, Poll, ready};
-
-pub(crate) struct Connecting<'c> {
-    tls: Resolving<'c>,
-    user_agent: Option<&'static str>,
-    headers: Option<HeaderList<'c>>,
-}
-
-impl<'c> Future for Connecting<'c> {
-    type Output = io::Result<Client<'c>>;
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let res = ready!(Pin::new(&mut self.tls).poll(cx));
-
-        match res {
-            Ok(tls) => {
-                // Under normal circumstances this is 100% safe.
-                let user_agent = self.user_agent.take().expect("no user_agent present");
-
-                let headers = self.headers.take();
-                let client = Client {
-                    tls,
-                    user_agent,
-                    headers,
-                };
-
-                Poll::Ready(Ok(client))
-            }
-            Err(e) => Poll::Ready(Err(e)),
-        }
-    }
-}
-
-pub struct Client<'c> {
-    tls: TlsClient<'c>,
-    user_agent: &'static str,
-    headers: Option<HeaderList<'c>>,
-}
 
 #[derive(Debug)]
 pub enum Method {
@@ -50,6 +18,93 @@ pub enum Method {
     PATCH,
     OPTIONS,
     CONNECT,
+}
+
+pub(crate) struct Connecting<'c> {
+    tls: Resolving<'c>,
+    user_agent: Option<&'static str>,
+    headers: Option<HeaderList<'c>>,
+}
+
+struct Envelope {
+    data: Vec<u8>,
+    oneshot: Option<oneshot::Sender<Vec<u8>>>,
+}
+
+pub struct HttpsConn<'h> {
+    io: TlsClient<'h>,
+    recv: mpsc::Receiver<Envelope>,
+    chan: Option<Envelope>,
+}
+
+impl<'h> Future for HttpsConn<'h> {
+    type Output = io::Result<()>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        use lamp::io::AsyncWrite;
+        use mpsc::TryRecvError::{Disconnected, Empty};
+
+        let mut envl = if self.chan.is_some() {
+            self.chan.take().unwrap()
+        } else {
+            match self.recv.try_recv() {
+                Ok(envl) => envl,
+
+                Err(e) => match e {
+                    Empty => return Poll::Pending,
+
+                    Disconnected => {
+                        let err = io::Error::new(io::ErrorKind::Other, "chan disconnected");
+
+                        return Poll::Ready(Err(err));
+                    }
+                },
+            }
+        };
+
+        match Pin::new(&mut self.io).poll_write(cx, &envl.data) {
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Ready(_size) => {}
+            Poll::Pending => {
+                self.chan.replace(envl);
+                return Poll::Pending;
+            }
+        }
+
+        match Pin::new(&mut self.io).poll_flush(cx) {
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Ready(_size) => {}
+            Poll::Pending => {
+                self.chan.replace(envl);
+                return Poll::Pending;
+            }
+        }
+
+        let mut buf: [u8; 16800] = [0; 16800];
+
+        match Pin::new(&mut self.io).poll_read(cx, &mut buf) {
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Ready(_size) => {
+                let channel = envl.oneshot.take().unwrap();
+
+                // check for result?
+                let _ = channel.send(buf.to_vec());
+            }
+            Poll::Pending => {
+                self.chan.replace(envl);
+                return Poll::Pending;
+            }
+        }
+
+        Poll::Pending
+    }
+}
+
+pub struct Client<'c> {
+    user_agent: &'static str,
+    headers: Option<HeaderList<'c>>,
+    waker: std::task::Waker,
+    sender: mpsc::Sender<Envelope>,
 }
 
 impl Method {
@@ -67,12 +122,12 @@ impl Method {
 }
 
 impl<'c> Client<'c> {
-    pub fn connect(
+    pub async fn connect(
         url: &'static str,
         user_agent: &'static str,
         headers: Option<&'c HashMap<&'c str, String>>,
-    ) -> io::Result<Connecting<'c>> {
-        let tls = TlsClient::create(None, url)?;
+    ) -> io::Result<Client<'c>> {
+        let io = TlsClient::create(None, url)?.await?;
 
         let hdr = match headers {
             None => None,
@@ -85,11 +140,40 @@ impl<'c> Client<'c> {
             }
         };
 
-        Ok(Connecting {
-            tls,
-            user_agent: Some(user_agent),
+        let (sender, recv) = mpsc::channel();
+
+        let conn = HttpsConn {
+            io,
+            recv,
+            chan: None,
+        };
+
+        println!("hehehehai!, {:?}", std::thread::current().name());
+        let handle = Executor::spawn(conn);
+
+        Ok(Client {
+            user_agent,
             headers: hdr,
+            waker: unsafe { handle.expose_waker() },
+            sender,
         })
+    }
+
+    pub fn execute(&mut self, req: ReqBuilder) -> oneshot::Receiver<Vec<u8>> {
+        let (s, r) = oneshot::channel();
+
+        let data = req.construct();
+        let envl = Envelope {
+            data,
+            oneshot: Some(s),
+        };
+
+        // handle this later
+        let _res = self.sender.send(envl);
+
+        self.waker.wake_by_ref();
+
+        r
     }
 
     pub(crate) fn get_header_slice(&self) -> Option<&[(&'c str, &'c str)]> {
@@ -99,9 +183,9 @@ impl<'c> Client<'c> {
         }
     }
 
-    pub fn execute(&'c mut self, req: ReqBuilder) -> RequestFuture<'c> {
-        let data = req.construct();
+    // pub fn execute(&mut self, req: ReqBuilder) -> RequestFuture<'_> {
+    //     let data = req.construct();
 
-        RequestFuture::new(data, &mut self.tls)
-    }
+    //     RequestFuture::new(data, self)
+    // }
 }
