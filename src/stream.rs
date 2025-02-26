@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::task::ready;
 use std::task::{Context, Poll};
 
-use log::{debug, error, info};
+use log::debug;
 
 #[cfg(debug_assertions)]
 #[derive(Debug)]

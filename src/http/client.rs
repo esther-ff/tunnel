@@ -1,15 +1,14 @@
-use super::request::{HeaderList, ReqBuilder, RequestFuture};
+use super::request::{HeaderList, ReqBuilder};
 use crate::tls_client::{Resolving, TlsClient};
 use futures::channel::oneshot;
 use lamp::Executor;
-use lamp::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
 use std::sync::mpsc;
-use std::task::{Context, Poll, ready};
+use std::task::{Context, Poll};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum Method {
     GET,
     PUT,
@@ -20,12 +19,27 @@ pub enum Method {
     CONNECT,
 }
 
+impl Method {
+    pub(crate) const fn bytes(&self) -> &'static [u8] {
+        match *self {
+            Method::GET => const { "GET ".as_bytes() },
+            Method::PUT => const { "PUT ".as_bytes() },
+            Method::POST => const { "POST ".as_bytes() },
+            Method::HEAD => const { "HEAD ".as_bytes() },
+            Method::PATCH => const { "PATCH ".as_bytes() },
+            Method::OPTIONS => const { "OPTIONS ".as_bytes() },
+            Method::CONNECT => const { "CONNECT ".as_bytes() },
+        }
+    }
+}
+
 pub(crate) struct Connecting<'c> {
     tls: Resolving<'c>,
     user_agent: Option<&'static str>,
     headers: Option<HeaderList<'c>>,
 }
 
+#[derive(Debug)]
 struct Envelope {
     data: Vec<u8>,
     oneshot: Option<oneshot::Sender<Vec<u8>>>,
@@ -41,8 +55,10 @@ impl<'h> Future for HttpsConn<'h> {
     type Output = io::Result<()>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        use lamp::io::AsyncWrite;
+        use lamp::io::{AsyncRead, AsyncWrite};
         use mpsc::TryRecvError::{Disconnected, Empty};
+
+        println!("Polling!");
 
         let mut envl = if self.chan.is_some() {
             self.chan.take().unwrap()
@@ -62,36 +78,43 @@ impl<'h> Future for HttpsConn<'h> {
             }
         };
 
+        println!("Writing!");
         match Pin::new(&mut self.io).poll_write(cx, &envl.data) {
             Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
             Poll::Ready(_size) => {}
             Poll::Pending => {
+                println!("write not ready");
                 self.chan.replace(envl);
                 return Poll::Pending;
             }
         }
 
+        println!("Flushing!");
         match Pin::new(&mut self.io).poll_flush(cx) {
             Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
             Poll::Ready(_size) => {}
             Poll::Pending => {
+                println!("flush not ready");
                 self.chan.replace(envl);
                 return Poll::Pending;
             }
         }
 
         let mut buf: [u8; 16800] = [0; 16800];
-
+        println!("Reading!");
         match Pin::new(&mut self.io).poll_read(cx, &mut buf) {
             Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-            Poll::Ready(_size) => {
+            Poll::Ready(size) => {
+                println!("read ready!");
                 let channel = envl.oneshot.take().unwrap();
 
                 // check for result?
-                let _ = channel.send(buf.to_vec());
+                let _ = dbg!(channel.send(buf[0..size.unwrap()].to_vec()));
             }
             Poll::Pending => {
-                self.chan.replace(envl);
+                println!("read not ready!");
+                dbg!(self.chan.replace(envl));
+                dbg!(&self.chan);
                 return Poll::Pending;
             }
         }
@@ -105,20 +128,6 @@ pub struct Client<'c> {
     headers: Option<HeaderList<'c>>,
     waker: std::task::Waker,
     sender: mpsc::Sender<Envelope>,
-}
-
-impl Method {
-    pub(crate) const fn bytes(&self) -> &'static [u8] {
-        match *self {
-            Method::GET => "GET ".as_bytes(),
-            Method::PUT => "PUT ".as_bytes(),
-            Method::POST => "POST ".as_bytes(),
-            Method::HEAD => "HEAD ".as_bytes(),
-            Method::PATCH => "PATCH ".as_bytes(),
-            Method::OPTIONS => "OPTIONS ".as_bytes(),
-            Method::CONNECT => "CONNECT ".as_bytes(),
-        }
-    }
 }
 
 impl<'c> Client<'c> {

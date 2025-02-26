@@ -143,6 +143,8 @@ mod tests {
 
     #[test]
     fn connect_to_rust_lang_via_https_client() {
+        static LOG: Logger = Logger;
+        log_init(&LOG).expect("log fail");
         use http::client::{Client, Method};
         use http::request::ReqBuilder;
 
@@ -156,7 +158,12 @@ mod tests {
                 .unwrap();
             req.add_headers(vec![("Test-header", "Test-value")]);
 
+            let (req_as_string, content) = req.clone().show_as_string();
+            println!("Req: {req_as_string:?}");
+            println!("content: {:#?}", content);
+
             let test = client.execute(req).await.unwrap();
+            let _ = dbg!(std::str::from_utf8(&test));
         });
 
         rt.shutdown();

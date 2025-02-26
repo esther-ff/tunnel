@@ -1,11 +1,4 @@
-use std::future::Future;
-use std::io;
-use std::pin::Pin;
-use std::task::{Context, Poll, ready};
-
 use super::client::{Client, Method};
-use crate::tls_client::TlsClient;
-use lamp::io::{AsyncRead, AsyncWrite};
 use std::mem::MaybeUninit;
 
 const HEADER_MAX: usize = 24;
@@ -14,15 +7,6 @@ pub(crate) struct RequestFuture<'a> {
     data: Option<Vec<u8>>,
     client: &'a mut Client<'a>,
     buf: Option<Vec<u8>>,
-}
-
-macro_rules! out {
-    ($expr: expr) => {
-        match $expr {
-            Ok(_) => {}
-            Err(e) => return Poll::Ready(Err(e)),
-        }
-    };
 }
 
 impl<'a> RequestFuture<'a> {
@@ -72,7 +56,7 @@ impl<'a> RequestFuture<'a> {
 //     }
 // }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HeaderList<'h> {
     hdr: [MaybeUninit<(&'h str, &'h str)>; HEADER_MAX],
     cursor: usize,
@@ -174,7 +158,7 @@ impl std::ops::Drop for HeaderList<'_> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ReqBuilder<'b> {
     method: Method,
     route: Option<&'b str>,
@@ -287,6 +271,21 @@ impl<'b> ReqBuilder<'b> {
         };
 
         req
+    }
+
+    /// Function only used for testing
+    /// Very heavy
+    pub fn show_as_string(mut self) -> (String, Option<Vec<u8>>) {
+        let content = match self.content.take() {
+            None => None,
+            Some(cnt) => Some(cnt.to_vec()),
+        };
+
+        let bytes = self.construct();
+
+        let string = unsafe { std::str::from_utf8_unchecked(&bytes) }.to_string();
+
+        (string, content)
     }
 }
 
