@@ -43,11 +43,11 @@ mod tests {
     }
 
     fn log_init(logger: &'static Logger) -> Result<(), log::SetLoggerError> {
-        log::set_logger(logger).map(|()| log::set_max_level(log::LevelFilter::Debug))
+        log::set_logger(logger).map(|()| log::set_max_level(log::LevelFilter::Warn))
     }
 
     #[test]
-    fn connect_to_rust_lang_stream_only() {
+    fn connect_to_rust_lang_via_stream() {
         static LOG: Logger = Logger;
         log_init(&LOG).expect("log fail");
         let mut rt = Executor::new(4);
@@ -131,7 +131,7 @@ mod tests {
             let _ = client.write(&req).await;
             let read = client.read(&mut buf).await.unwrap();
 
-            println!("{}", std::str::from_utf8(&buf[0..read]).unwrap());
+            // println!("{}", std::str::from_utf8(&buf[0..read]).unwrap());
         };
 
         let res = rt.block_on(task);
@@ -143,8 +143,6 @@ mod tests {
 
     #[test]
     fn connect_to_rust_lang_via_https_client() {
-        static LOG: Logger = Logger;
-        log_init(&LOG).expect("log fail");
         use http::client::{Client, Method};
         use http::request::ReqBuilder;
 
