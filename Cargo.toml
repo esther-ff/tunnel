@@ -6,11 +6,14 @@ edition = "2024"
 [lib]
 
 [dependencies]
+bytes = "1.10.0"
 futures = "0.3.31"
 # lamp = { git = "https://github.com/esther-ff/lamp" }
 lamp = { path = "/data/git/lamp" }
 log = "0.4.25"
+memchr = "2.7.4"
 mio = "1.0.3"
+regex = "1.11.1"
 rustls = "0.23.22"
 rustls-pki-types = "1.11.0"
 webpki-roots = "0.26.8"

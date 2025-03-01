@@ -1,4 +1,5 @@
 use super::request::{HeaderList, ReqBuilder};
+use super::response::Response;
 use crate::tls_client::{Resolving, TlsClient};
 use futures::channel::oneshot;
 use lamp::Executor;
@@ -42,7 +43,7 @@ pub(crate) struct Connecting<'c> {
 #[derive(Debug)]
 struct Envelope {
     data: Vec<u8>,
-    oneshot: Option<oneshot::Sender<Vec<u8>>>,
+    oneshot: Option<oneshot::Sender<Response>>,
 }
 
 pub struct HttpsConn<'h> {
@@ -108,8 +109,11 @@ impl<'h> Future for HttpsConn<'h> {
                 println!("read ready!");
                 let channel = envl.oneshot.take().unwrap();
 
-                // check for result?
-                let _ = dbg!(channel.send(buf[0..size.unwrap()].to_vec()));
+                let resp = match Response::new(buf[0..size.unwrap()].to_vec()) {
+                    Ok(resp) => resp,
+                    Err(_e) => panic!("impl this later"),
+                }; // check for result?
+                let _ = dbg!(channel.send(resp));
             }
             Poll::Pending => {
                 println!("read not ready!");
@@ -168,7 +172,7 @@ impl<'c> Client<'c> {
         })
     }
 
-    pub fn execute(&mut self, req: ReqBuilder) -> oneshot::Receiver<Vec<u8>> {
+    pub fn execute(&mut self, req: ReqBuilder) -> oneshot::Receiver<Response> {
         let (s, r) = oneshot::channel();
 
         let data = req.construct();

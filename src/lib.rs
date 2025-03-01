@@ -48,8 +48,8 @@ mod tests {
 
     #[test]
     fn connect_to_rust_lang_via_stream() {
-        static LOG: Logger = Logger;
-        log_init(&LOG).expect("log fail");
+        // static LOG: Logger = Logger;
+        // log_init(&LOG).expect("log fail");
         let mut rt = Executor::new(4);
 
         let result = rt.block_on(async {
@@ -161,7 +161,7 @@ mod tests {
             println!("content: {:#?}", content);
 
             let test = client.execute(req).await.unwrap();
-            let _ = dbg!(std::str::from_utf8(&test));
+            let _ = dbg!(&test);
         });
 
         rt.shutdown();
