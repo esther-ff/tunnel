@@ -109,11 +109,11 @@ impl<'h> Future for HttpsConn<'h> {
                 println!("read ready!");
                 let channel = envl.oneshot.take().unwrap();
 
-                let resp = match Response::new(buf[0..size.unwrap()].to_vec()) {
-                    Ok(resp) => resp,
-                    Err(_e) => panic!("impl this later"),
-                }; // check for result?
-                let _ = dbg!(channel.send(resp));
+                // let resp = match Response::new(buf[0..size.unwrap()].to_vec()) {
+                //     Ok(resp) => resp,
+                //     Err(_e) => panic!("impl this later"),
+                // }; // check for result?
+                let _ = dbg!(channel.send(Response::dummy()));
             }
             Poll::Pending => {
                 println!("read not ready!");

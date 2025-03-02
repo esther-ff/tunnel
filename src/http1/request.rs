@@ -19,43 +19,6 @@ impl<'a> RequestFuture<'a> {
     }
 }
 
-// impl<'a> Future for RequestFuture<'a> {
-//     type Output = io::Result<()>;
-//     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-//         let data = self.data.take().unwrap();
-//         let res = match Pin::new(&mut self.client.tls).poll_write(cx, &data) {
-//             Poll::Pending => {
-//                 self.data.replace(data);
-
-//                 return Poll::Pending;
-//             }
-
-//             Poll::Ready(res) => res,
-//         };
-//         out!(res);
-
-//         let flush_res = ready!(Pin::new(&mut self.client.tls).poll_flush(cx));
-//         out!(flush_res);
-
-//         let mut buf = self
-//             .buf
-//             .take()
-//             .expect("buf field for RequestFuture should not be empty");
-
-//         let pin = Pin::new(&mut self.client.tls);
-
-//         match pin.poll_write(cx, &mut buf) {
-//             Poll::Pending => {
-//                 self.buf.replace(buf);
-//                 Poll::Pending
-//             }
-
-//             Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
-//             Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-//         }
-//     }
-// }
-
 #[derive(Debug, Clone)]
 pub struct HeaderList<'h> {
     hdr: [MaybeUninit<(&'h str, &'h str)>; HEADER_MAX],

@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-mod http;
+mod http1;
 mod stream;
 mod tls_client;
 
@@ -143,8 +143,8 @@ mod tests {
 
     #[test]
     fn connect_to_rust_lang_via_https_client() {
-        use http::client::{Client, Method};
-        use http::request::ReqBuilder;
+        use http1::client::{Client, Method};
+        use http1::request::ReqBuilder;
 
         let mut rt = Executor::new(4);
 
