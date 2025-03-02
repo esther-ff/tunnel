@@ -2,6 +2,7 @@ use crate::http1::headers::{self, Header};
 use memchr::memchr;
 use std::io::{BufRead, Cursor};
 use std::str;
+use std::task::Poll;
 
 const VEC_PREALLOC: usize = 16 * 1024;
 pub type Result<T> = std::result::Result<T, HttpResErr>;
@@ -34,6 +35,25 @@ impl std::fmt::Display for HttpResErr {
 
 impl std::error::Error for HttpResErr {}
 
+#[derive(Debug, Copy, Clone)]
+pub(crate) struct StateSnapshot {
+    pub conn_closed: bool,
+    pub decoder_err: bool,
+
+    // This should eventually be converted into an enum.
+    pub upgrade: bool,
+}
+
+impl Default for StateSnapshot {
+    fn default() -> Self {
+        Self {
+            conn_closed: false,
+            decoder_err: false,
+            upgrade: false,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 /// Represents the current state of the `DataDecoder`
 enum DecoderState {
@@ -61,6 +81,9 @@ pub(crate) struct DataDecoder {
 
     /// Content Length registered
     content_len: Option<usize>,
+
+    /// Snapshot
+    snap: Option<StateSnapshot>,
 }
 
 impl DataDecoder {
@@ -72,6 +95,7 @@ impl DataDecoder {
             content: Some(Vec::with_capacity(VEC_PREALLOC)),
             resp: None,
             content_len: None,
+            snap: Some(StateSnapshot::default()),
         }
     }
 
@@ -116,6 +140,7 @@ impl DataDecoder {
         let bytes = if self.state == DecoderState::Headers {
             let cursor = Self::parse_headers(self, data)?;
             let pos = cursor.position() as usize;
+
             &cursor.into_inner()[pos..]
         } else {
             data
@@ -128,7 +153,6 @@ impl DataDecoder {
             _ => {
                 self.content.as_mut().unwrap().extend_from_slice(bytes);
 
-                //dbg!(&self.content);
                 let ready = match self.content_len {
                     Some(len) => len == self.content.as_ref().unwrap().len(),
                     None => true,
@@ -187,9 +211,6 @@ impl DataDecoder {
                 .extend_from_slice(&buf[index + 2..len + 3]);
             cursor.consume(index + len + 4);
         }
-
-        // dirty fix
-        self.content.as_mut().unwrap().pop();
 
         Ok(())
     }
@@ -292,6 +313,28 @@ impl DataDecoder {
         Ok(cursor)
     }
 
+    pub(crate) fn poll_response(&mut self) -> Poll<Response> {
+        if self.finished() {
+            let resp = self.get_resp().take().unwrap();
+
+            return Poll::Ready(resp);
+        };
+
+        Poll::Pending
+    }
+
+    pub(crate) fn state(&self) -> &StateSnapshot {
+        self.snap.as_ref().unwrap()
+    }
+
+    fn state_mut<F, T>(&mut self, f: F) -> T
+    where
+        F: FnOnce(&mut StateSnapshot) -> T,
+    {
+        let mut_ref = self.snap.as_mut().unwrap();
+        f(mut_ref)
+    }
+
     // Functions to set state
     fn s_content(&mut self) {
         self.state = DecoderState::Content
@@ -345,7 +388,7 @@ mod tests {
     use crate::http1::response::DataDecoder;
 
     #[test]
-    fn parse_headers_simple() {
+    fn resp_simple() {
         let resp = concat!(
             "HTTP/1.1 201 Created\r\n",
             "Content-Length: 2\r\n",
@@ -365,7 +408,7 @@ mod tests {
 
     #[test]
     #[should_panic]
-    fn parse_headers_simple_incorrect() {
+    fn resp_simple_panic() {
         let resp = concat!(
             "HTTP/1.1 201 Created\r\n",
             "Content-Length: 200\r\n",
@@ -373,7 +416,7 @@ mod tests {
             "Content-Encoding: none\r\n",
             "Test-Noimplement: Test\r\n",
             "\r\n",
-            "ASDASDA\r\nDADSADADAS",
+            "Versa\r\nilles",
         )
         .as_bytes();
 
@@ -381,11 +424,12 @@ mod tests {
         decoder.decode(&resp).unwrap();
         let resp = decoder.get_resp().unwrap();
 
-        let _ = dbg!(std::str::from_utf8(&resp.content.as_ref().unwrap()));
+        let text = std::str::from_utf8(&resp.content.as_ref().unwrap()).unwrap();
+        assert!(text == "Versa\r\nilles", "invalid string")
     }
 
     #[test]
-    fn parse_headers_fragmented() {
+    fn resp_simple_frag() {
         let resp = concat!(
             "HTTP/1.1 201 Created\r\n",
             "Content-Length: 5\r\n",
@@ -401,16 +445,18 @@ mod tests {
 
         let mut decoder = DataDecoder::new();
         decoder.decode(&resp).unwrap();
-        dbg!(&decoder);
         decoder.decode(&resp1).unwrap();
-        dbg!(&decoder);
         let resp = decoder.get_resp().unwrap();
 
-        let _ = dbg!(std::str::from_utf8(&resp.content.as_ref().unwrap()));
+        let text = std::str::from_utf8(&resp.content.as_ref().unwrap()).unwrap();
+        assert!(text == "ABCDE", "invalid string")
     }
 
     #[test]
-    fn parse_headers_transfer_enc_chunked() {
+    fn resp_simple_broken_up() {}
+
+    #[test]
+    fn resp_chunked_full() {
         let resp = concat!(
             "HTTP/1.1 201 Created\r\n",
             "Content-Language: en\r\n",
@@ -420,7 +466,7 @@ mod tests {
             "\r\n",
             "4\r\ntest\r\n",
             "5\r\ntest1\r\n",
-            "6\r\ntest2\r\n",
+            "5\r\ntest2\r\n",
             "0\r\n\r\n",
         )
         .as_bytes()
@@ -429,11 +475,12 @@ mod tests {
         let mut decoder = DataDecoder::new();
         decoder.decode(&resp).unwrap();
         let resp = decoder.get_resp().unwrap();
-        dbg!(&resp);
-        let _ = dbg!(std::str::from_utf8(&resp.content.as_ref().unwrap()));
+        let text = std::str::from_utf8(&resp.content.as_ref().unwrap()).unwrap();
+        assert!(text == "testtest1test2", "invalid string")
     }
+
     #[test]
-    fn parse_headers_transfer_enc_really_chunked() {
+    fn resp_chunked_two_parts() {
         let resp = concat!(
             "HTTP/1.1 201 Created\r\n",
             "Content-Language: en\r\n",
@@ -447,14 +494,13 @@ mod tests {
         .as_bytes()
         .to_vec();
 
-        let resp1 = concat!("6\r\ntest2\r\n", "0\r\n\r\n",).as_bytes();
+        let resp1 = concat!("5\r\ntest2\r\n", "0\r\n\r\n",).as_bytes();
 
         let mut decoder = DataDecoder::new();
         decoder.decode(&resp).unwrap();
-        dbg!(&decoder);
         decoder.decode(&resp1).unwrap();
-        dbg!(&decoder);
         let resp = decoder.get_resp().unwrap();
-        let _ = dbg!(std::str::from_utf8(&resp.content.as_ref().unwrap()));
+        let text = std::str::from_utf8(&resp.content.as_ref().unwrap()).unwrap();
+        assert!(text == "testtest1test2", "invalid string")
     }
 }

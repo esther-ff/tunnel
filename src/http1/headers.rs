@@ -6,15 +6,12 @@ pub enum MimeType {
     ImagePng,
     ImageJpeg,
     ImageGif,
-
     Unimplemented,
 }
 
 impl MimeType {
     pub fn recognize(line: &str) -> MimeType {
         use MimeType::*;
-
-        dbg!(&line);
 
         match line {
             "application/json" => AppJson,
@@ -29,6 +26,22 @@ impl MimeType {
     }
 }
 
+#[derive(Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub enum ConnectionState {
+    Close,
+    KeepAlive,
+}
+
+impl ConnectionState {
+    /// This implementation falls back to a default of Keep-Alive
+    /// if `line` is different than "close".
+    pub fn recognize(line: &str) -> ConnectionState {
+        use ConnectionState::*;
+
+        if line == "close" { Close } else { KeepAlive }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Copy, Clone)]
 pub enum TrfrEncodingType {
     Gzip,
@@ -36,9 +49,7 @@ pub enum TrfrEncodingType {
     Deflate,
     GzipChunked,
     DeflateChunked,
-
     None,
-
     Unknown,
 }
 
@@ -65,6 +76,7 @@ pub enum Header {
     ContentEncoding(String),
     ContentLanguage(String),
     TransferEncoding(TrfrEncodingType),
+    Connection(ConnectionState),
 
     Unimplemented((String, String)),
 }
@@ -102,6 +114,10 @@ impl Header {
 
             "Transfer-Encoding" => Ok(TransferEncoding(TrfrEncodingType::recognize(val))),
 
+            "Connection" => Ok(Connection(ConnectionState::recognize(val))),
+
+            // Fallback for any unknown/unimplemented header
+            // essentially a todo.
             _ => Ok(Unimplemented((name.to_string(), val.to_string()))),
         }
     }
