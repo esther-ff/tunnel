@@ -1,4 +1,4 @@
-use crate::http1::headers::{self, Header};
+use crate::http1::headers::{self, ConnectionState, Header};
 use memchr::memchr;
 use std::io::{BufRead, Cursor};
 use std::str;
@@ -42,6 +42,9 @@ pub(crate) struct StateSnapshot {
 
     // This should eventually be converted into an enum.
     pub upgrade: bool,
+
+    // todo!
+    pub upgrade_protocol: usize,
 }
 
 impl Default for StateSnapshot {
@@ -50,6 +53,7 @@ impl Default for StateSnapshot {
             conn_closed: false,
             decoder_err: false,
             upgrade: false,
+            upgrade_protocol: 0,
         }
     }
 }
@@ -83,7 +87,7 @@ pub(crate) struct DataDecoder {
     content_len: Option<usize>,
 
     /// Snapshot
-    snap: Option<StateSnapshot>,
+    snap: StateSnapshot,
 }
 
 impl DataDecoder {
@@ -95,7 +99,7 @@ impl DataDecoder {
             content: Some(Vec::with_capacity(VEC_PREALLOC)),
             resp: None,
             content_len: None,
-            snap: Some(StateSnapshot::default()),
+            snap: StateSnapshot::default(),
         }
     }
 
@@ -284,17 +288,32 @@ impl DataDecoder {
 
                         Ok(header) => {
                             cursor.consume(num + 2);
-                            dbg!(&header);
+
+                            use Header::*;
+
                             match header {
-                                Header::TransferEncoding(tr) => {
+                                TransferEncoding(tr) => {
                                     me.s_chk_content();
 
                                     me.encoding = tr;
                                 }
 
-                                Header::ContentLength(len) => me.content_len = Some(len),
+                                ContentLength(len) => me.content_len = Some(len),
+
+                                Connection(ref state) => {
+                                    if state == &ConnectionState::Close {
+                                        me.state_mut(|state| state.upgrade == true);
+                                    }
+
+                                    // detect later to what protocol to upgrade
+                                }
+
+                                Upgrade(ref _protocol) => {
+                                    todo!();
+                                }
                                 _ => {} // todo for more stuffs.
-                            }
+                            };
+
                             headers.push(header);
                         }
                     };
@@ -324,15 +343,14 @@ impl DataDecoder {
     }
 
     pub(crate) fn state(&self) -> &StateSnapshot {
-        self.snap.as_ref().unwrap()
+        &self.snap
     }
 
     fn state_mut<F, T>(&mut self, f: F) -> T
     where
         F: FnOnce(&mut StateSnapshot) -> T,
     {
-        let mut_ref = self.snap.as_mut().unwrap();
-        f(mut_ref)
+        f(&mut self.snap)
     }
 
     // Functions to set state

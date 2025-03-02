@@ -156,12 +156,13 @@ mod tests {
                 .unwrap();
             req.add_headers(vec![("Test-header", "Test-value")]);
 
-            let (req_as_string, content) = req.clone().show_as_string();
-            println!("Req: {req_as_string:?}");
-            println!("content: {:#?}", content);
+            let resp = client.execute(req).await.unwrap().unwrap();
 
-            let test = client.execute(req).await.unwrap();
-            let _ = dbg!(&test);
+            let str_resp = std::str::from_utf8(resp.content().unwrap());
+
+            assert!(str_resp.is_ok(), "invalid string");
+
+            println!("response content: {}", str_resp.unwrap());
         });
 
         rt.shutdown();

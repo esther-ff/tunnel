@@ -1,5 +1,5 @@
 use super::request::{HeaderList, ReqBuilder};
-use super::response::Response;
+use super::response::{DataDecoder, Response};
 use crate::tls_client::{Resolving, TlsClient};
 use futures::channel::oneshot;
 use lamp::Executor;
@@ -43,13 +43,29 @@ pub(crate) struct Connecting<'c> {
 #[derive(Debug)]
 struct Envelope {
     data: Vec<u8>,
-    oneshot: Option<oneshot::Sender<Response>>,
+    oneshot: Option<oneshot::Sender<io::Result<Response>>>,
 }
+
+impl Envelope {
+    fn chan_fn<F, T>(&mut self, f: F) -> T
+    where
+        F: FnOnce(oneshot::Sender<io::Result<Response>>) -> T,
+    {
+        let chan = self.oneshot.take().expect("chan should be here");
+        let val = f(chan);
+        val
+    }
+}
+
+// todo
+struct State;
 
 pub struct HttpsConn<'h> {
     io: TlsClient<'h>,
     recv: mpsc::Receiver<Envelope>,
     chan: Option<Envelope>,
+    state: State,
+    decoder: DataDecoder,
 }
 
 impl<'h> Future for HttpsConn<'h> {
@@ -105,15 +121,27 @@ impl<'h> Future for HttpsConn<'h> {
         println!("Reading!");
         match Pin::new(&mut self.io).poll_read(cx, &mut buf) {
             Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-            Poll::Ready(size) => {
+            Poll::Ready(Ok(size)) => {
                 println!("read ready!");
-                let channel = envl.oneshot.take().unwrap();
 
-                // let resp = match Response::new(buf[0..size.unwrap()].to_vec()) {
-                //     Ok(resp) => resp,
-                //     Err(_e) => panic!("impl this later"),
-                // }; // check for result?
-                let _ = dbg!(channel.send(Response::dummy()));
+                if let Err(e) = self.decoder.decode(&buf[0..size]) {
+                    let err = io::Error::new(io::ErrorKind::Other, e);
+
+                    let _ = envl.chan_fn(|ch| ch.send(Err(err)));
+                }
+
+                if self.decoder.finished() {
+                    let resp = Ok(self
+                        .decoder
+                        .get_resp()
+                        .expect("there should always be a response in slot"));
+
+                    let _ = envl.chan_fn(|ch| ch.send(resp));
+                } else {
+                    return Poll::Pending;
+                }
+
+                // let _ = dbg!(channel.send(Response::dummy()));
             }
             Poll::Pending => {
                 println!("read not ready!");
@@ -159,6 +187,8 @@ impl<'c> Client<'c> {
             io,
             recv,
             chan: None,
+            state: State,
+            decoder: DataDecoder::new(),
         };
 
         println!("hehehehai!, {:?}", std::thread::current().name());
@@ -172,7 +202,7 @@ impl<'c> Client<'c> {
         })
     }
 
-    pub fn execute(&mut self, req: ReqBuilder) -> oneshot::Receiver<Response> {
+    pub fn execute(&mut self, req: ReqBuilder) -> oneshot::Receiver<io::Result<Response>> {
         let (s, r) = oneshot::channel();
 
         let data = req.construct();

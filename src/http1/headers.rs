@@ -30,15 +30,18 @@ impl MimeType {
 pub enum ConnectionState {
     Close,
     KeepAlive,
+    Upgrade,
 }
 
 impl ConnectionState {
-    /// This implementation falls back to a default of Keep-Alive
-    /// if `line` is different than "close".
     pub fn recognize(line: &str) -> ConnectionState {
         use ConnectionState::*;
 
-        if line == "close" { Close } else { KeepAlive }
+        match line {
+            "close" | "Close" => Close,
+            "upgrade" | "Upgrade" => Upgrade,
+            _ => KeepAlive,
+        }
     }
 }
 
@@ -77,6 +80,7 @@ pub enum Header {
     ContentLanguage(String),
     TransferEncoding(TrfrEncodingType),
     Connection(ConnectionState),
+    Upgrade(String),
 
     Unimplemented((String, String)),
 }
@@ -115,6 +119,9 @@ impl Header {
             "Transfer-Encoding" => Ok(TransferEncoding(TrfrEncodingType::recognize(val))),
 
             "Connection" => Ok(Connection(ConnectionState::recognize(val))),
+
+            // partially to-do
+            "Upgrade" => Ok(Upgrade(val.to_string())),
 
             // Fallback for any unknown/unimplemented header
             // essentially a todo.
