@@ -1,5 +1,6 @@
 use crate::http1::headers::{self, ConnectionState, Header};
 use memchr::memchr;
+use rustls_pki_types::SubjectPublicKeyInfoDer;
 use std::io::{BufRead, Cursor};
 use std::str;
 use std::task::Poll;
@@ -105,7 +106,6 @@ impl DataDecoder {
 
     /// Returns a `bool` indicating whether it's finished (true) or not done yet (false)
     pub(crate) fn finished(&self) -> bool {
-        dbg!(&self.state);
         self.state == DecoderState::Finished
     }
 
@@ -399,6 +399,28 @@ impl Response {
     pub fn content(&self) -> Option<&[u8]> {
         self.content.as_ref().map(|vec| &**vec)
     }
+
+    pub fn status(&self) -> ResponseType {
+        use ResponseType::*;
+
+        match self.code {
+            code if code <= 199 => Informational,
+            code if code <= 299 => Successful,
+            code if code <= 399 => Redirection,
+            code if code <= 499 => ClientError,
+            code if code <= 599 => ServerError,
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ResponseType {
+    Informational,
+    Successful,
+    Redirection,
+    ClientError,
+    ServerError,
 }
 
 #[cfg(test)]

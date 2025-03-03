@@ -2,7 +2,6 @@ use super::request::{HeaderList, ReqBuilder};
 use super::response::{DataDecoder, Response};
 use crate::tls_client::{Resolving, TlsClient};
 use futures::channel::oneshot;
-use lamp::Executor;
 use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
@@ -61,11 +60,23 @@ impl Envelope {
 struct State;
 
 pub struct HttpsConn<'h> {
+    /// TLS connection,
     io: TlsClient<'h>,
+
+    /// Receiver
     recv: mpsc::Receiver<Envelope>,
+
+    /// Slot for currently processed request
     chan: Option<Envelope>,
+
+    /// Internal state
     state: State,
+
+    /// Decoder for data.
     decoder: DataDecoder,
+
+    /// Reciever for a notification to shutdown
+    shutdown: mpsc::Receiver<()>,
 }
 
 impl<'h> Future for HttpsConn<'h> {
@@ -74,8 +85,6 @@ impl<'h> Future for HttpsConn<'h> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         use lamp::io::{AsyncRead, AsyncWrite};
         use mpsc::TryRecvError::{Disconnected, Empty};
-
-        println!("Polling!");
 
         let mut envl = if self.chan.is_some() {
             self.chan.take().unwrap()
@@ -95,61 +104,47 @@ impl<'h> Future for HttpsConn<'h> {
             }
         };
 
-        println!("Writing!");
-        match Pin::new(&mut self.io).poll_write(cx, &envl.data) {
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-            Poll::Ready(_size) => {}
-            Poll::Pending => {
-                println!("write not ready");
-                self.chan.replace(envl);
-                return Poll::Pending;
-            }
+        if let Ok(()) = self.shutdown.try_recv() {
+            return Poll::Ready(Ok(()));
         }
 
-        println!("Flushing!");
-        match Pin::new(&mut self.io).poll_flush(cx) {
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-            Poll::Ready(_size) => {}
-            Poll::Pending => {
-                println!("flush not ready");
-                self.chan.replace(envl);
-                return Poll::Pending;
-            }
-        }
+        for _ in 0..8 {
+            let _ = Pin::new(&mut self.io).poll_write(cx, &envl.data);
+            let _ = Pin::new(&mut self.io).poll_flush(cx);
 
-        let mut buf: [u8; 16800] = [0; 16800];
-        println!("Reading!");
-        match Pin::new(&mut self.io).poll_read(cx, &mut buf) {
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-            Poll::Ready(Ok(size)) => {
-                println!("read ready!");
+            let mut buf: [u8; 16800] = [0; 16800];
+            println!("Reading!");
+            match Pin::new(&mut self.io).poll_read(cx, &mut buf) {
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Ok(size)) => {
+                    println!("read ready!");
 
-                if let Err(e) = self.decoder.decode(&buf[0..size]) {
-                    let err = io::Error::new(io::ErrorKind::Other, e);
+                    if let Err(e) = self.decoder.decode(&buf[0..size]) {
+                        let err = io::Error::new(io::ErrorKind::Other, e);
 
-                    let _ = envl.chan_fn(|ch| ch.send(Err(err)));
+                        let _ = envl.chan_fn(|ch| ch.send(Err(err)));
+                    }
+
+                    if self.decoder.finished() {
+                        let resp = self
+                            .decoder
+                            .get_resp()
+                            .expect("there should always be a response in slot");
+
+                        match resp.status() {
+                            _ => {} // todo:
+                        }
+
+                        let _ = envl.chan_fn(|ch| ch.send(Ok(resp)));
+                    }
+                    // let _ = dbg!(channel.send(Response::dummy()));
                 }
 
-                if self.decoder.finished() {
-                    let resp = Ok(self
-                        .decoder
-                        .get_resp()
-                        .expect("there should always be a response in slot"));
-
-                    let _ = envl.chan_fn(|ch| ch.send(resp));
-                } else {
-                    return Poll::Pending;
-                }
-
-                // let _ = dbg!(channel.send(Response::dummy()));
-            }
-            Poll::Pending => {
-                println!("read not ready!");
-                dbg!(self.chan.replace(envl));
-                dbg!(&self.chan);
-                return Poll::Pending;
+                _ => {}
             }
         }
+
+        self.chan.replace(envl);
 
         Poll::Pending
     }
@@ -158,7 +153,7 @@ impl<'h> Future for HttpsConn<'h> {
 pub struct Client<'c> {
     user_agent: &'static str,
     headers: Option<HeaderList<'c>>,
-    waker: std::task::Waker,
+    shutdown: mpsc::Sender<()>,
     sender: mpsc::Sender<Envelope>,
 }
 
@@ -183,21 +178,24 @@ impl<'c> Client<'c> {
 
         let (sender, recv) = mpsc::channel();
 
+        let (sender1, recv1) = mpsc::channel();
+
         let conn = HttpsConn {
             io,
             recv,
             chan: None,
             state: State,
             decoder: DataDecoder::new(),
+            shutdown: recv1,
         };
 
-        println!("hehehehai!, {:?}", std::thread::current().name());
-        let handle = Executor::spawn(conn);
+        use lamp::Executor;
+        let _ = Executor::spawn(conn);
 
         Ok(Client {
             user_agent,
             headers: hdr,
-            waker: unsafe { handle.expose_waker() },
+            shutdown: sender1,
             sender,
         })
     }
@@ -214,9 +212,11 @@ impl<'c> Client<'c> {
         // handle this later
         let _res = self.sender.send(envl);
 
-        self.waker.wake_by_ref();
-
         r
+    }
+
+    pub fn shutdown(&self) -> Result<(), mpsc::SendError<()>> {
+        self.shutdown.send(())
     }
 
     pub(crate) fn get_header_slice(&self) -> Option<&[(&'c str, &'c str)]> {
